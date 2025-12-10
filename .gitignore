@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+env/
+*.egg-info/
+
+# Models
+models/*.h5
+models/*.pkl
+
+# Data
+data/*.db
+data/*.csv
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Environment variables (SENSITIVE!)
+.env

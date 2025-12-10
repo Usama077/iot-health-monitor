@@ -1,0 +1,28 @@
+{
+  "mqtt": {
+    "broker": "${MQTT_BROKER}",
+    "port": "${MQTT_PORT}",
+    "topic": "${MQTT_TOPIC}",
+    "client_id": "${MQTT_CLIENT_ID}"
+  },
+  "database": {
+    "type": "mysql",
+    "host": "${DB_HOST}",
+    "port": "${DB_PORT}",
+    "database": "${DB_NAME}",
+    "user": "${DB_USER}",
+    "password": "${DB_PASSWORD}"
+  },
+  "ai_model": {
+    "threshold": 0.05,
+    "consecutive_alerts": 3,
+    "model_path": "models/autoencoder.h5",
+    "scaler_path": "models/scaler.pkl"
+  },
+  "simulation": {
+    "hr_normal_range": [60, 100],
+    "spo2_normal_range": [95, 100],
+    "anomaly_probability": 0.15,
+    "send_interval": 2
+  }
+}
