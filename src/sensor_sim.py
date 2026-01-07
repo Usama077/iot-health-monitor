@@ -3,7 +3,7 @@ IoT Sensor Simulator
 Simulates real-time health monitoring sensors sending data via MQTT
 Member A: IoT Infrastructure
 """
-
+import json  
 import time
 import random
 from datetime import datetime
@@ -14,6 +14,7 @@ import sys
 sys.path.append('.')
 
 from src.mqtt_client import MQTTClient
+import paho.mqtt.client as mqtt
 from config_loader import get_config
 
 logging.basicConfig(
@@ -36,8 +37,7 @@ class HealthSensorSimulator:
         self.send_interval = sim_config['send_interval']
         
         # MQTT client
-        self.mqtt_client = MQTTClient(client_id=self.config.get('MQTT_CLIENT_ID_SENSOR'))
-        
+        self.mqtt_client = mqtt.Client(client_id=self.config.get('MQTT_CLIENT_ID_SENSOR'))        
         # Anomaly tracking (for demo purposes)
         self.consecutive_hr_anomalies = 0
         self.consecutive_spo2_anomalies = 0
@@ -121,41 +121,55 @@ class HealthSensorSimulator:
         logger.info("Starting IoT Health Sensor Simulation")
         logger.info("=" * 60)
         logger.info("")
-        
-        # Connect to MQTT
-        if not self.mqtt_client.connect():
+
+        # Get broker details from config
+        broker = self.config.get('mqtt', 'broker')
+        port = self.config.get('mqtt', 'port')
+        topic = self.config.get('mqtt', 'topic')
+
+        # Connect to MQTT broker
+        try:
+            self.mqtt_client.connect(host=broker, port=port, keepalive=60)
+            self.mqtt_client.loop_start()  # Start background thread for network events
+            logger.info(f"✓ Connected to MQTT broker: {broker}:{port}")
+            logger.info(f"✓ Publishing to topic: {topic}")
+            logger.info("")
+            logger.info("Generating sensor readings... (Ctrl+C to stop)")
+            logger.info("=" * 60)
+            logger.info("")
+
+        except Exception as e:
             logger.error("Failed to connect to MQTT broker!")
+            logger.error(f"Error: {e}")
             logger.error("Please check:")
             logger.error("  1. Internet connection")
-            logger.error("  2. broker.hivemq.com is accessible")
+            logger.error(f"  2. Broker {broker}:{port} is accessible")
             return
-        
-        logger.info("✓ Connected to MQTT broker")
-        logger.info(f"✓ Publishing to topic: {self.mqtt_client.topic}")
-        logger.info("")
-        logger.info("Generating sensor readings... (Ctrl+C to stop)")
-        logger.info("=" * 60)
-        logger.info("")
-        
+
         try:
             while True:
                 # Create and send reading
                 reading = self.create_reading()
-                success = self.mqtt_client.publish(reading)
-                
-                if not success:
-                    logger.error("Failed to publish reading")
-                
+                payload = json.dumps(reading)  # Make sure it's a JSON string
+                result = self.mqtt_client.publish(topic, payload)
+
+                if result.rc != 0:  # 0 = MQTT_ERR_SUCCESS
+                    logger.error(f"Failed to publish reading (rc={result.rc})")
+                else:
+                    logger.info(f"Published: HR={reading['hr']}, SpO2={reading['spo2']}")
                 # Wait before next reading
                 time.sleep(self.send_interval)
-                
+
         except KeyboardInterrupt:
             logger.info("\n\n" + "=" * 60)
             logger.info("Stopping sensor simulation...")
             logger.info(f"Total readings sent: {self.readings_count}")
             logger.info("=" * 60)
-            self.mqtt_client.disconnect()
 
+        finally:
+            self.mqtt_client.loop_stop()
+            self.mqtt_client.disconnect()
+            logger.info("Disconnected from MQTT broker")
 
 def main():
     """Main execution"""

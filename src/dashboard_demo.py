@@ -71,7 +71,7 @@ st.sidebar.markdown("### 🎯 System Status")
 st.sidebar.success("✓ Database Connected")
 st.sidebar.info("ℹ️ Waiting for sensor data...")
 
-# Main content
+# Main content  
 col1, col2 = st.columns([2, 1])
 
 with col1:

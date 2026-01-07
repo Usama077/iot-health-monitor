@@ -4,38 +4,33 @@ Handles connection setup and publishing/subscribing logic
 Member A: IoT Infrastructure
 """
 
-import random
-import string
 import paho.mqtt.client as mqtt
 import json
 import logging
 import time
-from config_loader import get_config
-
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
-class   MQTTClient:
-   # At the top, add import
-# Replace __init__ method:
-    def __init__(self, client_id=None):
+class MQTTClient:
+    def __init__(self, config_path='config.json'):
         """
         Initialize MQTT client with configuration
+        
+        Args:
+            config_path (str): Path to configuration file
         """
-        config = get_config()
-        mqtt_config = config.get_section('mqtt')
+        from config_loader import get_config
+        
+        # Use the singleton config that already did substitution + type fixes
+        config_loader = get_config(config_path=config_path)  # it handles .env too
+        mqtt_config = config_loader.get_section('mqtt')
         
         self.broker = mqtt_config['broker']
-        # Ensure port is an integer
-        port = mqtt_config['port']
-        self.port = int(port) if isinstance(port, str) else port
+        self.port = mqtt_config['port']
         self.topic = mqtt_config['topic']
-        
-        if client_id is None:
-            client_id = 'client_' + ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
-        self.client_id = client_id
+        self.client_id = mqtt_config['client_id']
         
         self.client = mqtt.Client(client_id=self.client_id)
         self.connected = False
@@ -46,7 +41,7 @@ class   MQTTClient:
         self.client.on_message = self._on_message
         
         logger.info(f"MQTT Client initialized: {self.client_id}")
-        
+    
     def _on_connect(self, client, userdata, flags, rc):
         """Callback when connected to broker"""
         if rc == 0:
@@ -80,40 +75,47 @@ class   MQTTClient:
         except Exception as e:
             logger.error(f"Error processing message: {e}")
     
-    def connect(self, timeout=10, start_loop=True):
+    def connect(self, timeout=10):
         """
-        Connect to MQTT broker
+        Connect to MQTT broker with retry logic
         
         Args:
             timeout (int): Connection timeout in seconds
-            start_loop (bool): If True, start background network loop (loop_start). If False, caller will run loop.
         
         Returns:
             bool: True if connected successfully
         """
-        try:
-            logger.info(f"Connecting to {self.broker}:{self.port}...")
-            self.client.connect(self.broker, self.port, keepalive=60)
-            # Start network loop in background only if requested. For long-running
-            # subscriber processes that call `loop_forever()` themselves, pass
-            # start_loop=False to avoid mixing loop modes.
-            if start_loop:
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                logger.info(f"Connecting to {self.broker}:{self.port}... (Attempt {retry_count + 1}/{max_retries})")
+                self.client.connect(self.broker, self.port, keepalive=60)
                 self.client.loop_start()
-            
-            # Wait for connection
-            start_time = time.time()
-            while not self.connected and (time.time() - start_time) < timeout:
-                time.sleep(0.1)
-            
-            if self.connected:
-                return True
-            else:
-                logger.error("Connection timeout")
-                return False
                 
-        except Exception as e:
-            logger.error(f"Failed to connect: {e}")
-            return False
+                # Wait for connection
+                start_time = time.time()
+                while not self.connected and (time.time() - start_time) < timeout:
+                    time.sleep(0.1)
+                
+                if self.connected:
+                    return True
+                else:
+                    logger.warning(f"Connection timeout (attempt {retry_count + 1})")
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        time.sleep(2)
+                    
+            except Exception as e:
+                logger.error(f"Connection failed: {e}")
+                retry_count += 1
+                if retry_count < max_retries:
+                    logger.info(f"Retrying in 2 seconds...")
+                    time.sleep(2)
+        
+        logger.error("Failed to connect after all retries")
+        return False
     
     def disconnect(self):
         """Disconnect from MQTT broker"""
@@ -192,16 +194,22 @@ class   MQTTClient:
             return False
     
     def loop_forever(self):
-        logger.info("Starting MQTT loop...")
+        """Keep the client running (blocking call) with auto-reconnect"""
+        logger.info("Starting MQTT loop (Ctrl+C to stop)...")
         try:
-            # Use paho-mqtt's built-in blocking loop which handles reconnection
-            # and socket polling. Callers should ensure they did not start the
-            # background loop (i.e., connect(start_loop=False)).
-            self.client.loop_forever()
+            # Enable auto-reconnect
+            self.client.reconnect_delay_set(min_delay=1, max_delay=60)
+            self.client.loop_forever(retry_first_connection=True)
         except KeyboardInterrupt:
-            logger.info("Stopping MQTT client...")
+            logger.info("\nStopping MQTT client...")
             self.disconnect()
-
+        except Exception as e:
+            logger.error(f"MQTT loop error: {e}")
+            # Try to reconnect
+            logger.info("Attempting to reconnect...")
+            time.sleep(2)
+            if self.connect():
+                self.loop_forever()  # Restart loop
 
 
 # Test functions
