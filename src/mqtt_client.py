@@ -34,6 +34,7 @@ class MQTTClient:
         
         self.client = mqtt.Client(client_id=self.client_id)
         self.connected = False
+        self.loop_started = False
         
         # Set up callbacks
         self.client.on_connect = self._on_connect
@@ -48,6 +49,7 @@ class MQTTClient:
             self.connected = True
             logger.info(f"✓ Connected to MQTT Broker: {self.broker}:{self.port}")
         else:
+            self.connected = False
             logger.error(f"✗ Connection failed with code: {rc}")
             error_messages = {
                 1: "Incorrect protocol version",
@@ -92,7 +94,11 @@ class MQTTClient:
             try:
                 logger.info(f"Connecting to {self.broker}:{self.port}... (Attempt {retry_count + 1}/{max_retries})")
                 self.client.connect(self.broker, self.port, keepalive=60)
-                self.client.loop_start()
+                
+                # Start network loop in background thread
+                if not self.loop_started:
+                    self.client.loop_start()
+                    self.loop_started = True
                 
                 # Wait for connection
                 start_time = time.time()
@@ -119,8 +125,11 @@ class MQTTClient:
     
     def disconnect(self):
         """Disconnect from MQTT broker"""
-        self.client.loop_stop()
+        if self.loop_started:
+            self.client.loop_stop()
+            self.loop_started = False
         self.client.disconnect()
+        self.connected = False
         logger.info("Disconnected from MQTT broker")
     
     def publish(self, message, topic=None):
@@ -135,7 +144,7 @@ class MQTTClient:
             bool: True if published successfully
         """
         if not self.connected:
-            logger.error("Not connected to broker! Call connect() first.")
+            logger.debug("Not connected to broker. Cannot publish.")
             return False
         
         publish_topic = topic or self.topic
@@ -146,9 +155,6 @@ class MQTTClient:
         
         try:
             result = self.client.publish(publish_topic, message, qos=1)
-            
-            # Wait for message to be sent
-            result.wait_for_publish()
             
             if result.rc == mqtt.MQTT_ERR_SUCCESS:
                 logger.debug(f"📤 Published to {publish_topic}")
@@ -194,22 +200,19 @@ class MQTTClient:
             return False
     
     def loop_forever(self):
-        """Keep the client running (blocking call) with auto-reconnect"""
+        """
+        Keep the client running (blocking call)
+        This is just a placeholder to keep the main thread alive
+        since loop_start() handles networking in background
+        """
         logger.info("Starting MQTT loop (Ctrl+C to stop)...")
         try:
-            # Enable auto-reconnect
-            self.client.reconnect_delay_set(min_delay=1, max_delay=60)
-            self.client.loop_forever(retry_first_connection=True)
+            # Just keep main thread alive - loop_start() handles everything
+            while True:
+                time.sleep(1)
         except KeyboardInterrupt:
             logger.info("\nStopping MQTT client...")
-            self.disconnect()
-        except Exception as e:
-            logger.error(f"MQTT loop error: {e}")
-            # Try to reconnect
-            logger.info("Attempting to reconnect...")
-            time.sleep(2)
-            if self.connect():
-                self.loop_forever()  # Restart loop
+            raise
 
 
 # Test functions
@@ -264,7 +267,10 @@ def test_subscribe():
     
     if client.connect():
         client.subscribe(callback=message_handler)
-        client.loop_forever()
+        try:
+            client.loop_forever()
+        except KeyboardInterrupt:
+            client.disconnect()
     else:
         logger.error("❌ Connection failed")
 

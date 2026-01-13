@@ -1,6 +1,7 @@
 """
 Backend with Simple AI (Isolation Forest)
 No TensorFlow required - uses only scikit-learn
+Includes Android MQTT support for real-time notifications
 """
 
 import time
@@ -9,6 +10,7 @@ import logging
 import sys
 import pickle
 import numpy as np
+from datetime import datetime
 
 # Add parent directory to path
 sys.path.append('.')
@@ -31,6 +33,13 @@ class SimpleAIBackend:
         self.db = DatabaseManager()
         self.mqtt_client = MQTTClient()
         
+        # Android MQTT topics for direct publishing (using same client)
+        self.android_topics = {
+            'sensor_data': 'health/android/sensor_data',
+            'anomaly_alert': 'health/android/anomaly_alert',
+            'device_status': 'health/android/device_status'
+        }
+        
         # Load AI model
         self.model = None
         self.scaler = None
@@ -45,6 +54,7 @@ class SimpleAIBackend:
         self.consecutive_alerts = ai_config['consecutive_alerts']
         
         logger.info("Simple AI Backend initialized")
+        logger.info("✓ Android MQTT topics configured for push notifications")
     
     def load_model(self):
         """Load Isolation Forest model"""
@@ -160,11 +170,69 @@ class SimpleAIBackend:
         
         return should_alert
     
-    def send_alert(self, hr, spo2, anomaly_type):
-        """Send alert"""
-        logger.warning(f"📧 EMAIL ALERT WOULD BE SENT:")
+    def publish_to_android(self, topic, message, log_message=""):
+        """
+        Safely publish to Android app topics
+        
+        Args:
+            topic (str): MQTT topic to publish to
+            message (dict): Message payload
+            log_message (str): Optional log message
+        """
+        if not self.mqtt_client.connected:
+            logger.debug(f"Not connected. Skipping publish to {topic}")
+            return False
+        
+        try:
+            success = self.mqtt_client.publish(
+                message,
+                topic=topic
+            )
+            
+            if success and log_message:
+                logger.info(log_message)
+            
+            return success
+                
+        except Exception as e:
+            logger.debug(f"Error publishing to {topic}: {e}")
+            return False
+    
+    def send_alert(self, hr, spo2, anomaly_type, record_id=None):
+        """Send alert to Android app via MQTT"""
+        logger.warning(f"📧 ALERT TRIGGERED:")
         logger.warning(f"   Type: {anomaly_type}")
         logger.warning(f"   HR: {hr} bpm, SpO2: {spo2}%")
+        
+        # Determine severity based on anomaly type
+        if anomaly_type == "HR+SpO2":
+            severity = "critical"
+        elif anomaly_type in ["HR", "SpO2"]:
+            severity = "high"
+        else:
+            severity = "medium"
+        
+        # Publish to Android app via MQTT
+        message = {
+            'timestamp': datetime.now().isoformat(),
+            'hr': hr,
+            'spo2': spo2,
+            'anomaly_type': anomaly_type,
+            'severity': severity,
+            'record_id': record_id,
+            'alert_type': 'anomaly_detected',
+            'notification': {
+                'title': f'⚠️ Health Alert: {anomaly_type}',
+                'body': f'HR: {hr} bpm | SpO2: {spo2}%',
+                'importance': 'high'
+            }
+        }
+        
+        self.publish_to_android(
+            self.android_topics['anomaly_alert'],
+            message,
+            f"🚨📱 Anomaly alert published: {anomaly_type} (HR={hr}, SpO2={spo2}%, Severity={severity})"
+        )
     
     def process_message(self, client, userdata, msg):
         """Process MQTT message"""
@@ -176,6 +244,18 @@ class SimpleAIBackend:
             timestamp = data.get('timestamp')
             hr = data.get('hr')
             spo2 = data.get('spo2')
+            
+            # Publish real-time sensor data to Android app
+            sensor_msg = {
+                'timestamp': timestamp,
+                'hr': hr,
+                'spo2': spo2,
+                'data_type': 'sensor_reading'
+            }
+            self.publish_to_android(
+                self.android_topics['sensor_data'],
+                sensor_msg
+            )
             
             # AI detection
             is_anomaly, score, anomaly_type = self.detect_anomaly(hr, spo2)
@@ -195,9 +275,6 @@ class SimpleAIBackend:
             # Check consecutive
             should_alert = self.check_consecutive_anomalies(is_anomaly, anomaly_type)
             
-            if should_alert:
-                self.send_alert(hr, spo2, anomaly_type)
-            
             # Save to database
             record = {
                 'timestamp': timestamp,
@@ -212,11 +289,15 @@ class SimpleAIBackend:
             
             if record_id:
                 logger.debug(f"  → Saved (ID: {record_id})")
+                
+                # Send alert to Android if needed
+                if should_alert:
+                    self.send_alert(hr, spo2, anomaly_type, record_id)
             else:
                 logger.error("  → Save failed")
         
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.error(f"Error processing message: {e}")
             import traceback
             traceback.print_exc()
     
@@ -229,6 +310,7 @@ class SimpleAIBackend:
         logger.info("Configuration:")
         logger.info(f"  AI Model: Isolation Forest")
         logger.info(f"  Alert After: {self.consecutive_alerts} consecutive anomalies")
+        logger.info(f"  Android Topics: {list(self.android_topics.values())}")
         logger.info("")
         
         # Connect MQTT with retry
@@ -240,10 +322,26 @@ class SimpleAIBackend:
                 logger.info("✓ Connected to MQTT")
                 logger.info(f"✓ Subscribed to: {self.mqtt_client.topic}")
                 logger.info("")
+                logger.info("📱 Real-time Android notifications active")
                 logger.info("AI system active. Monitoring...")
                 logger.info("(Ctrl+C to stop)")
                 logger.info("=" * 60)
                 logger.info("")
+                
+                # Give connection a moment to stabilize
+                time.sleep(0.5)
+                
+                # Publish online status to Android
+                status_msg = {
+                    'timestamp': datetime.now().isoformat(),
+                    'status': 'online',
+                    'message': 'AI Backend connected and monitoring'
+                }
+                self.publish_to_android(
+                    self.android_topics['device_status'],
+                    status_msg,
+                    "📱 Backend status published to Android"
+                )
                 
                 # Subscribe
                 self.mqtt_client.subscribe(callback=self.process_message)
@@ -254,6 +352,17 @@ class SimpleAIBackend:
                 except KeyboardInterrupt:
                     logger.info("\n\n" + "=" * 60)
                     logger.info("Stopping backend...")
+                    
+                    # Publish offline status to Android
+                    status_msg = {
+                        'timestamp': datetime.now().isoformat(),
+                        'status': 'offline',
+                        'message': 'AI Backend shutting down'
+                    }
+                    self.publish_to_android(
+                        self.android_topics['device_status'],
+                        status_msg
+                    )
                     
                     stats = self.db.get_statistics()
                     if stats:
