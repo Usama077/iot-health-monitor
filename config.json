@@ -16,7 +16,6 @@
   "ai_model": {
     "threshold": 0.05,
     "consecutive_alerts": 3,
-    "model_path": "models/autoencoder.h5",
     "scaler_path": "models/scaler.pkl"
   },
   "simulation": {
