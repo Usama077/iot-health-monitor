@@ -1,6 +1,6 @@
 """
 Simplified Backend with FCM Push Notifications
-Token stored in .env file - no HTTP registration needed
+All data sent via single MQTT topic with anomaly info
 """
 
 import time
@@ -34,12 +34,8 @@ class SimpleAIBackend:
         self.db = DatabaseManager()
         self.mqtt_client = MQTTClient()
         
-        # Android MQTT topics
-        self.android_topics = {
-            'sensor_data': 'health/android/sensor_data',
-            'anomaly_alert': 'health/android/anomaly_alert',
-            'device_status': 'health/android/device_status'
-        }
+        # Single Android MQTT topic for all data
+        self.android_topic = 'health/android/sensor_data'
         
         # Load AI model
         self.model = None
@@ -60,7 +56,7 @@ class SimpleAIBackend:
         self.consecutive_alerts = ai_config['consecutive_alerts']
         
         logger.info("Simple AI Backend initialized")
-        logger.info("✓ Android MQTT topics configured")
+        logger.info(f"✓ Android MQTT topic: {self.android_topic}")
     
     def initialize_fcm(self):
         """Initialize Firebase Cloud Messaging"""
@@ -186,58 +182,25 @@ class SimpleAIBackend:
         
         return should_alert
     
-    def publish_to_android(self, topic, message, log_message=""):
-        """Safely publish to Android app topics via MQTT"""
+    def publish_to_android(self, message):
+        """Publish sensor data with anomaly info to Android app via MQTT"""
         if not self.mqtt_client.connected:
-            logger.debug(f"Not connected. Skipping MQTT publish to {topic}")
+            logger.debug("Not connected. Skipping MQTT publish")
             return False
         
         try:
-            success = self.mqtt_client.publish(message, topic=topic)
-            if success and log_message:
-                logger.info(log_message)
+            success = self.mqtt_client.publish(message, topic=self.android_topic)
+            if success:
+                logger.debug(f"📤 Published to {self.android_topic}")
+            else:
+                logger.warning(f"⚠️  Failed to publish to {self.android_topic}")
             return success
         except Exception as e:
-            logger.debug(f"Error publishing to {topic}: {e}")
+            logger.error(f"Error publishing to MQTT: {e}")
             return False
     
-    def send_alert(self, hr, spo2, anomaly_type, record_id=None):
-        """Send alert via both MQTT and FCM push notification"""
-        logger.warning(f"📧 ALERT TRIGGERED:")
-        logger.warning(f"   Type: {anomaly_type}")
-        logger.warning(f"   HR: {hr} bpm, SpO2: {spo2}%")
-        
-        # Determine severity
-        if anomaly_type == "HR+SpO2":
-            severity = "critical"
-        elif anomaly_type in ["HR", "SpO2"]:
-            severity = "high"
-        else:
-            severity = "medium"
-        
-        # 1. Publish to MQTT (for real-time in-app updates)
-        message = {
-            'timestamp': datetime.now().isoformat(),
-            'hr': hr,
-            'spo2': spo2,
-            'anomaly_type': anomaly_type,
-            'severity': severity,
-            'record_id': record_id,
-            'alert_type': 'anomaly_detected',
-            'notification': {
-                'title': f'⚠️ Health Alert: {anomaly_type}',
-                'body': f'HR: {hr} bpm | SpO2: {spo2}%',
-                'importance': 'high'
-            }
-        }
-        
-        self.publish_to_android(
-            self.android_topics['anomaly_alert'],
-            message,
-            f"📱 MQTT alert published: {anomaly_type}"
-        )
-        
-        # 2. Send FCM Push Notification (works even when app is closed!)
+    def send_fcm_notification(self, hr, spo2, anomaly_type, severity, record_id=None):
+        """Send FCM push notification for critical anomalies"""
         if self.fcm_manager and self.device_token:
             try:
                 success = self.fcm_manager.send_anomaly_notification(
@@ -269,35 +232,55 @@ class SimpleAIBackend:
             hr = data.get('hr')
             spo2 = data.get('spo2')
             
-            # Publish real-time sensor data to Android app
+            # AI detection
+            is_anomaly, score, anomaly_type = self.detect_anomaly(hr, spo2)
+            
+            # Determine severity
+            severity = None
+            if is_anomaly:
+                if anomaly_type == "HR+SpO2":
+                    severity = "critical"
+                elif anomaly_type in ["HR", "SpO2"]:
+                    severity = "high"
+                else:
+                    severity = "medium"
+            
+            # Check if should send alert
+            should_alert = self.check_consecutive_anomalies(is_anomaly, anomaly_type)
+            
+            # Create comprehensive message with all data
             sensor_msg = {
+                # Sensor readings
                 'timestamp': timestamp,
                 'hr': hr,
                 'spo2': spo2,
+                
+                # Anomaly detection results
+                'is_anomaly': bool(is_anomaly),
+                'anomaly_type': anomaly_type if is_anomaly else None,
+                'anomaly_score': float(score),
+                'severity': severity,
+                
+                # Alert status
+                'should_alert': bool(should_alert),
+                
+                # Metadata
                 'data_type': 'sensor_reading'
             }
-            self.publish_to_android(
-                self.android_topics['sensor_data'],
-                sensor_msg
-            )
             
-            # AI detection
-            is_anomaly, score, anomaly_type = self.detect_anomaly(hr, spo2)
+            # Publish to Android app via MQTT
+            self.publish_to_android(sensor_msg)
             
             # Log
             if is_anomaly:
                 logger.warning(
                     f"🚨 ANOMALY: HR={hr}, SpO2={spo2}% | "
-                    f"Type={anomaly_type} | Score={score:.4f}"
+                    f"Type={anomaly_type} | Severity={severity} | Score={score:.4f}"
                 )
             else:
                 logger.info(
-                    f"✓ Normal: HR={hr}, SpO2={spo2}% | "
-                    f"Score={score:.4f}"
+                    f"✓ Normal: HR={hr}, SpO2={spo2}% | Score={score:.4f}"
                 )
-            
-            # Check consecutive
-            should_alert = self.check_consecutive_anomalies(is_anomaly, anomaly_type)
             
             # Save to database
             record = {
@@ -313,12 +296,18 @@ class SimpleAIBackend:
             
             if record_id:
                 logger.debug(f"  → Saved (ID: {record_id})")
-                
-                # Send alert if needed
-                if should_alert:
-                    self.send_alert(hr, spo2, anomaly_type, record_id)
             else:
                 logger.error("  → Save failed")
+            
+            # Send FCM push notification on anomaly detection
+            if is_anomaly:
+                logger.warning(f"📧 ANOMALY DETECTED: {anomaly_type}")
+                logger.warning(f"   HR: {hr} bpm, SpO2: {spo2}%")
+                self.send_fcm_notification(hr, spo2, anomaly_type, severity, record_id)
+            
+            # Log consecutive alert threshold
+            if should_alert:
+                logger.critical(f"🚨 CRITICAL: Consecutive anomalies threshold met!")
         
         except Exception as e:
             logger.error(f"Error processing message: {e}")
@@ -334,9 +323,19 @@ class SimpleAIBackend:
         logger.info("Configuration:")
         logger.info(f"  AI Model: Isolation Forest")
         logger.info(f"  Alert After: {self.consecutive_alerts} consecutive anomalies")
-        logger.info(f"  MQTT Topics: {list(self.android_topics.values())}")
+        logger.info(f"  MQTT Topic: {self.android_topic}")
         logger.info(f"  FCM Enabled: {'✅ Yes' if self.fcm_manager else '❌ No'}")
         logger.info(f"  Device Token: {'✅ Configured' if self.device_token else '❌ Not set'}")
+        logger.info("")
+        logger.info("Message Format:")
+        logger.info("  {")
+        logger.info("    timestamp, hr, spo2,")
+        logger.info("    is_anomaly (bool),")
+        logger.info("    anomaly_type (str or null),")
+        logger.info("    anomaly_score (float),")
+        logger.info("    severity (str or null),")
+        logger.info("    should_alert (bool)")
+        logger.info("  }")
         logger.info("")
         
         # Connect MQTT
@@ -352,18 +351,6 @@ class SimpleAIBackend:
             # Give connection a moment to stabilize
             time.sleep(0.5)
             
-            # Publish online status
-            status_msg = {
-                'timestamp': datetime.now().isoformat(),
-                'status': 'online',
-                'message': 'AI Backend connected and monitoring'
-            }
-            self.publish_to_android(
-                self.android_topics['device_status'],
-                status_msg,
-                "📱 Backend status published"
-            )
-            
             # Subscribe
             self.mqtt_client.subscribe(callback=self.process_message)
             
@@ -373,17 +360,6 @@ class SimpleAIBackend:
             except KeyboardInterrupt:
                 logger.info("\n\n" + "=" * 60)
                 logger.info("Stopping backend...")
-                
-                # Publish offline status
-                status_msg = {
-                    'timestamp': datetime.now().isoformat(),
-                    'status': 'offline',
-                    'message': 'AI Backend shutting down'
-                }
-                self.publish_to_android(
-                    self.android_topics['device_status'],
-                    status_msg
-                )
                 
                 stats = self.db.get_statistics()
                 if stats:
